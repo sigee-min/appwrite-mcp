@@ -5,7 +5,6 @@ import type {
   MutationOperation,
   MutationRequest,
   PreviewResponse,
-  StandardError,
   TargetOperationResult,
   TopLevelStatus
 } from "../domain/types.js";
@@ -38,6 +37,16 @@ interface SmokeServiceLike {
   apply(input: unknown): Promise<ApplyResponse | MutationErrorResponse>;
 }
 
+interface CliIo {
+  writeStdout: (line: string) => void;
+  writeStderr: (line: string) => void;
+}
+
+interface RunCliDependencies {
+  serviceFactory?: (argv: string[], env: NodeJS.ProcessEnv) => SmokeServiceLike;
+  io?: CliIo;
+}
+
 interface SmokeCaseResult {
   case_id: SmokeCaseId;
   case_name: string;
@@ -50,6 +59,8 @@ interface SmokeCaseResult {
   target_results: Array<{
     project_id: string;
     status: "SUCCESS" | "FAILED";
+    correlation_id: string;
+    redaction_applied: boolean;
     error_code?: string;
   }>;
 }
@@ -219,6 +230,8 @@ const buildCaseResult = (
     return {
       project_id: target.project_id,
       status: summary.status,
+      correlation_id: applyResult.correlation_id,
+      redaction_applied: hasRedactionMarker(firstOperation ?? target),
       error_code: summary.error_code
     };
   });
@@ -299,17 +312,27 @@ const ensureManualMode = (argv: string[]): void => {
 
 export const runCli = async (
   argv: string[],
-  env: NodeJS.ProcessEnv
+  env: NodeJS.ProcessEnv,
+  dependencies: RunCliDependencies = {}
 ): Promise<ManualSmokeReport> => {
   ensureManualMode(argv);
   const config = parseManualSmokeConfig(env);
-  const service = buildAppwriteControlService({
-    argv,
-    env
-  });
+  const serviceFactory =
+    dependencies.serviceFactory ??
+    ((runtimeArgv: string[], runtimeEnv: NodeJS.ProcessEnv) =>
+      buildAppwriteControlService({
+        argv: runtimeArgv,
+        env: runtimeEnv
+      }));
+  const io: CliIo = dependencies.io ?? {
+    writeStdout: (line) => process.stdout.write(line),
+    writeStderr: (line) => process.stderr.write(line)
+  };
+
+  const service = serviceFactory(argv, env);
   const report = await runManualSmokeSuite(service, config);
-  process.stderr.write(`${summaryLine(report)}\n`);
-  process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+  io.writeStderr(`${summaryLine(report)}\n`);
+  io.writeStdout(`${JSON.stringify(report, null, 2)}\n`);
   return report;
 };
 

@@ -9,6 +9,7 @@ import type {
 } from "../src/domain/types.js";
 import {
   parseManualSmokeConfig,
+  runCli,
   runManualSmokeSuite
 } from "../src/e2e/manual-smoke.js";
 
@@ -224,6 +225,8 @@ describe("manual smoke suite", () => {
     expect(report.summary.total).toBe(3);
     expect(report.summary.failed).toBe(0);
     expect(report.summary.overall).toBe("PASS");
+    expect(report.cases[0]?.target_results[0]?.correlation_id).toBe("apply-1");
+    expect(report.cases[0]?.target_results[0]?.redaction_applied).toBe(false);
   });
 
   it("records preview failure as failed case", async () => {
@@ -264,5 +267,145 @@ describe("manual smoke suite", () => {
 
     expect(report.summary.overall).toBe("FAIL");
     expect(report.cases[0]?.observed_status).toBe("PREVIEW_FAILED");
+  });
+
+  it("runCli rejects execution when --manual flag is absent", async () => {
+    await expect(runCli([], {})).rejects.toThrowError(
+      "manual gate required: run with --manual"
+    );
+  });
+
+  it("runCli writes one-line stderr summary and JSON stdout report", async () => {
+    const auth = createAuthFile();
+    const stdoutLines: string[] = [];
+    const stderrLines: string[] = [];
+
+    try {
+      let previewCall = 0;
+      await runCli(
+        ["--manual"],
+        {
+          APPWRITE_PROJECT_AUTH_FILE: auth.filePath,
+          APPWRITE_SMOKE_TARGETS: "P_A,P_B"
+        },
+        {
+          serviceFactory: () => ({
+            preview: () => {
+              previewCall += 1;
+              if (previewCall === 1) {
+                return buildPreviewSuccess("case1");
+              }
+              if (previewCall === 2) {
+                return buildPreviewSuccess("case2");
+              }
+              return buildPreviewSuccess("case3");
+            },
+            apply: async (input) => {
+              const typed = input as { plan_id: string };
+              if (typed.plan_id === "plan-case1") {
+                return {
+                  correlation_id: "cli-apply-1",
+                  mode: "apply",
+                  status: "SUCCESS",
+                  plan_id: "plan-case1",
+                  plan_hash: "hash-case1",
+                  target_results: [
+                    {
+                      target: { project_id: "P_A" },
+                      project_id: "P_A",
+                      status: "SUCCESS",
+                      operations: [{ operation_id: "op", status: "SUCCESS", data: {} }]
+                    },
+                    {
+                      target: { project_id: "P_B" },
+                      project_id: "P_B",
+                      status: "SUCCESS",
+                      operations: [{ operation_id: "op", status: "SUCCESS", data: {} }]
+                    }
+                  ],
+                  destructive_count: 0,
+                  risk_level: "LOW",
+                  summary: "ok"
+                };
+              }
+
+              if (typed.plan_id === "plan-case2") {
+                return {
+                  correlation_id: "cli-apply-2",
+                  mode: "apply",
+                  status: "PARTIAL_SUCCESS",
+                  plan_id: "plan-case2",
+                  plan_hash: "hash-case2",
+                  target_results: [
+                    {
+                      target: { project_id: "P_A" },
+                      project_id: "P_A",
+                      status: "SUCCESS",
+                      operations: [{ operation_id: "op", status: "SUCCESS", data: {} }]
+                    },
+                    {
+                      target: { project_id: "P_B" },
+                      project_id: "P_B",
+                      status: "FAILED",
+                      operations: [
+                        {
+                          operation_id: "op",
+                          status: "FAILED",
+                          error: {
+                            code: "MISSING_SCOPE",
+                            message: "missing",
+                            target: "P_B",
+                            operation_id: "op",
+                            retryable: false
+                          }
+                        }
+                      ]
+                    }
+                  ],
+                  destructive_count: 0,
+                  risk_level: "LOW",
+                  summary: "partial"
+                };
+              }
+
+              return {
+                correlation_id: "cli-apply-3",
+                mode: "apply",
+                status: "FAILED",
+                summary: "failed",
+                error: {
+                  code: "MISSING_SCOPE",
+                  message: "missing scopes",
+                  target: "P_A",
+                  operation_id: "op",
+                  retryable: false
+                }
+              };
+            }
+          }),
+          io: {
+            writeStdout: (line: string) => stdoutLines.push(line),
+            writeStderr: (line: string) => stderrLines.push(line)
+          }
+        }
+      );
+    } finally {
+      auth.cleanup();
+    }
+
+    expect(stderrLines.length).toBe(1);
+    expect(stderrLines[0]).toContain("SCN-020 manual smoke");
+    expect(stderrLines[0]).toContain("overall=PASS");
+    expect(stdoutLines.length).toBe(1);
+    const report = JSON.parse(stdoutLines[0] ?? "{}") as {
+      execution_policy?: string;
+      summary?: { overall?: string };
+      cases?: Array<{ target_results?: Array<{ correlation_id?: string }> }>;
+    };
+    expect(report.execution_policy).toBe("manual");
+    expect(report.summary?.overall).toBe("PASS");
+    expect(report.cases?.[0]?.target_results?.[0]?.correlation_id).toBe(
+      "cli-apply-1"
+    );
   });
 });
