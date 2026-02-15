@@ -85,6 +85,9 @@ interface ServiceBuildOptions {
   endpoint?: string | null;
   apiKey?: string | null;
   projectAuthContexts?: Record<string, AuthContext>;
+  knownProjectIds?: string[];
+  autoTargetProjectIds?: string[];
+  defaultTargetSelector?: { mode?: "auto" | "alias" | "project_id"; value?: string; values?: string[] };
 }
 
 const buildService = (options: ServiceBuildOptions = {}) => {
@@ -104,12 +107,23 @@ const buildService = (options: ServiceBuildOptions = {}) => {
     authContext: {
       endpoint,
       api_key: apiKey,
-      scopes: options.scopes ?? ["databases.write", "users.write", "functions.write", "projects.write"]
+      scopes:
+        options.scopes ??
+        [
+          "databases.write",
+          "users.read",
+          "users.write",
+          "functions.write",
+          "projects.write"
+        ]
     },
     projectAuthContexts: options.projectAuthContexts,
     confirmationSecret: "test-confirmation-secret",
     aliasMap: options.aliasMap ?? {},
     projectManagementAvailable: options.projectManagementAvailable ?? true,
+    knownProjectIds: options.knownProjectIds,
+    autoTargetProjectIds: options.autoTargetProjectIds,
+    defaultTargetSelector: options.defaultTargetSelector,
     transportDefault: "stdio",
     supportedTransports: options.supportedTransports ?? ["stdio"],
     requestedTransport: options.requestedTransport,
@@ -1103,6 +1117,280 @@ describe("ORC fixtures", () => {
     );
     expect(adapter.calls[0]?.auth_context.api_key).toBe("sk_from_file");
     expect(JSON.stringify(apply)).not.toContain("payload-secret-key");
+  });
+
+  it("ORC-FX-020: infers required_scopes from catalog when omitted", () => {
+    const { service } = buildService();
+
+    const preview = expectPreviewSuccess(
+      service.preview({
+        actor: "tester",
+        targets: [{ project_id: "P_A" }],
+        operations: [
+          {
+            operation_id: "op-infer-scope",
+            domain: "auth",
+            action: "auth.users.list",
+            params: { limit: 1 }
+          }
+        ]
+      })
+    );
+
+    expect(preview.required_scopes).toEqual(["users.read"]);
+  });
+
+  it("ORC-FX-021: auto selector resolves configured default targets without explicit targets[]", () => {
+    const { service } = buildService({
+      knownProjectIds: ["P_A", "P_B"],
+      autoTargetProjectIds: ["P_B"]
+    });
+
+    const preview = expectPreviewSuccess(
+      service.preview({
+        actor: "tester",
+        target_selector: { mode: "auto" },
+        operations: [baseOperation()]
+      })
+    );
+
+    expect(preview.target_projects).toEqual(["P_B"]);
+  });
+
+  it("ORC-FX-022: auto selector fails closed as TARGET_AMBIGUOUS when defaults are absent", () => {
+    const { service } = buildService({
+      knownProjectIds: ["P_A", "P_B"]
+    });
+
+    const preview = service.preview({
+      actor: "tester",
+      target_selector: { mode: "auto" },
+      operations: [baseOperation()]
+    });
+
+    if (!isMutationFailure(preview)) {
+      throw new Error("expected auto target ambiguity failure");
+    }
+
+    expect(preview.error.code).toBe("TARGET_AMBIGUOUS");
+  });
+
+  it("ORC-FX-023: exposes runtime context and scope catalog tools", () => {
+    const { service } = buildService({
+      aliasMap: { prod: "P_A" },
+      knownProjectIds: ["P_A", "P_B"],
+      autoTargetProjectIds: ["P_A"]
+    });
+
+    const context = service.getRuntimeContext();
+    expect(context.status).toBe("SUCCESS");
+    expect(context.context.known_project_ids).toEqual(["P_A", "P_B"]);
+    expect(context.context.alias_count).toBe(1);
+    expect(context.context.auto_target_project_ids).toEqual(["P_A"]);
+
+    const catalog = service.getScopeCatalog();
+    expect(catalog.status).toBe("SUCCESS");
+    expect(catalog.actions["auth.users.list"].required_scopes).toEqual([
+      "users.read"
+    ]);
+  });
+
+  it("ORC-FX-024: resolves target selector through service helper", () => {
+    const { service } = buildService({
+      aliasMap: { prod: "P_A" },
+      knownProjectIds: ["P_A", "P_B"],
+      autoTargetProjectIds: ["P_A"]
+    });
+
+    const resolved = service.resolveTargets({
+      targets: [],
+      target_selector: {
+        mode: "alias",
+        value: "prod"
+      }
+    });
+
+    expect(resolved.status).toBe("SUCCESS");
+    if (resolved.status !== "SUCCESS") {
+      throw new Error("expected target resolve success");
+    }
+
+    expect(resolved.resolved_targets).toEqual(["P_A"]);
+    expect(resolved.source).toBe("selector");
+  });
+
+  it("ORC-FX-025: explicit targets take precedence over target_selector", () => {
+    const { service } = buildService({
+      aliasMap: { prod: "P_B" },
+      knownProjectIds: ["P_A", "P_B"],
+      autoTargetProjectIds: ["P_B"]
+    });
+
+    const preview = expectPreviewSuccess(
+      service.preview({
+        actor: "tester",
+        targets: [{ project_id: "P_A" }],
+        target_selector: {
+          mode: "alias",
+          value: "prod"
+        },
+        operations: [baseOperation()]
+      })
+    );
+
+    expect(preview.target_projects).toEqual(["P_A"]);
+
+    const resolved = service.resolveTargets({
+      targets: [{ project_id: "P_A" }],
+      target_selector: {
+        mode: "alias",
+        value: "prod"
+      }
+    });
+
+    expect(resolved.status).toBe("SUCCESS");
+    if (resolved.status !== "SUCCESS") {
+      throw new Error("expected explicit target resolution success");
+    }
+    expect(resolved.source).toBe("explicit");
+    expect(resolved.resolved_targets).toEqual(["P_A"]);
+  });
+
+  it("ORC-FX-026: required_scopes cannot be downgraded below catalog minimum", () => {
+    const { service } = buildService({
+      scopes: ["users.read"]
+    });
+
+    const preview = expectPreviewSuccess(
+      service.preview({
+        actor: "tester",
+        targets: [{ project_id: "P_A" }],
+        operations: [
+          {
+            operation_id: "op-users-create-underdeclare",
+            domain: "auth",
+            action: "auth.users.create",
+            params: { user_id: "u-1", email: "user@example.com" },
+            required_scopes: ["users.read"]
+          }
+        ]
+      })
+    );
+
+    expect(preview.required_scopes).toContain("users.write");
+    expect(preview.required_scopes).toContain("users.read");
+  });
+
+  it("ORC-FX-027: client cannot downgrade destructive/critical policy by false override", async () => {
+    const { service } = buildService({
+      projectManagementAvailable: true
+    });
+
+    const preview = expectPreviewSuccess(
+      service.preview({
+        actor: "tester",
+        targets: [{ project_id: "P_A" }],
+        operations: [
+          {
+            operation_id: "op-project-delete-policy",
+            domain: "project",
+            action: "project.delete",
+            params: { project_id: "P_A" },
+            required_scopes: ["projects.write"],
+            destructive: false,
+            critical: false
+          }
+        ]
+      })
+    );
+
+    expect(preview.operations[0]?.destructive).toBe(true);
+    expect(preview.operations[0]?.critical).toBe(true);
+
+    const apply = await service.apply({
+      actor: "tester",
+      targets: [{ project_id: "P_A" }],
+      operations: [
+        {
+          operation_id: "op-project-delete-policy",
+          domain: "project",
+          action: "project.delete",
+          params: { project_id: "P_A" },
+          required_scopes: ["projects.write"],
+          destructive: false,
+          critical: false
+        }
+      ],
+      plan_id: preview.plan_id,
+      plan_hash: preview.plan_hash
+    });
+
+    expectApplyFailure(apply, "CONFIRM_REQUIRED");
+  });
+
+  it("ORC-FX-028: production runtime requires non-default confirmation secret", () => {
+    const authFile = createRuntimeAuthFile({
+      P_A: {
+        api_key: "sk_project_a",
+        scopes: ["databases.write"]
+      }
+    });
+
+    try {
+      expect(() =>
+        buildAppwriteControlService({
+          argv: [],
+          env: {
+            APPWRITE_PROJECT_AUTH_FILE: authFile.filePath,
+            NODE_ENV: "production"
+          }
+        })
+      ).toThrow(
+        "APPWRITE_MCP_CONFIRM_SECRET is required in production and must not use default"
+      );
+    } finally {
+      authFile.cleanup();
+    }
+  });
+
+  it("ORC-FX-029: startup fails when defaults.auto_target_project_ids includes unknown project", () => {
+    const directory = mkdtempSync(join(tmpdir(), "appwrite-mcp-auth-invalid-auto-"));
+    const filePath = join(directory, "project-auth.json");
+    writeFileSync(
+      filePath,
+      JSON.stringify(
+        {
+          default_endpoint: "https://example.appwrite.test/v1",
+          projects: {
+            P_A: {
+              api_key: "sk_project_a",
+              scopes: ["databases.write"]
+            }
+          },
+          defaults: {
+            auto_target_project_ids: ["P_UNKNOWN"]
+          }
+        },
+        null,
+        2
+      ),
+      "utf8"
+    );
+
+    try {
+      expect(() =>
+        buildAppwriteControlService({
+          argv: [],
+          env: {
+            APPWRITE_PROJECT_AUTH_FILE: filePath
+          }
+        })
+      ).toThrow(
+        "APPWRITE_PROJECT_AUTH_FILE defaults.auto_target_project_ids includes unknown project: P_UNKNOWN"
+      );
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it("extra: unknown tool failure includes correlation_id", async () => {
