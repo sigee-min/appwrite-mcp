@@ -80,6 +80,20 @@ describe("manual smoke suite", () => {
     }
   });
 
+  it("deduplicates APPWRITE_SMOKE_TARGETS before running cases", () => {
+    const auth = createAuthFile();
+    try {
+      const config = parseManualSmokeConfig({
+        APPWRITE_PROJECT_AUTH_FILE: auth.filePath,
+        APPWRITE_SMOKE_TARGETS: "P_A,P_B,P_A"
+      });
+
+      expect(config.targets).toEqual([{ projectId: "P_A" }, { projectId: "P_B" }]);
+    } finally {
+      auth.cleanup();
+    }
+  });
+
   it("fails parsing when targets are missing", () => {
     const auth = createAuthFile();
     expect(() =>
