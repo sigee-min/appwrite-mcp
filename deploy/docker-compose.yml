@@ -1,0 +1,13 @@
+services:
+  appwrite-mcp:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: appwrite-mcp:latest
+    restart: unless-stopped
+    env_file:
+      - ./.env
+    ports:
+      - "${APPWRITE_MCP_HTTP_PORT:-8080}:${APPWRITE_MCP_HTTP_PORT:-8080}"
+    volumes:
+      - "${APPWRITE_PROJECT_AUTH_FILE_HOST:-./config/project-auth.json}:${APPWRITE_PROJECT_AUTH_FILE:-/app/deploy/config/project-auth.json}:ro"

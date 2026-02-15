@@ -1,0 +1,21 @@
+{
+  "default_endpoint": "https://cloud.appwrite.io/v1",
+  "projects": {
+    "PROJECT_A": {
+      "api_key": "sk_example_project_a",
+      "scopes": ["users.read", "users.write"],
+      "aliases": ["prod", "main"],
+      "default_for_auto": true
+    },
+    "PROJECT_B": {
+      "api_key": "sk_example_project_b",
+      "scopes": ["users.read"]
+    }
+  },
+  "defaults": {
+    "auto_target_project_ids": ["PROJECT_A"],
+    "target_selector": {
+      "mode": "auto"
+    }
+  }
+}
