@@ -4,11 +4,11 @@ import type {
   MutationErrorResponse,
   MutationOperation,
   MutationRequest,
-  PreviewResponse,
   TargetOperationResult,
   TopLevelStatus
 } from "../domain/types.js";
 import { buildAppwriteControlService } from "../config/runtime-config.js";
+import type { AppwriteControlService } from "../core/appwrite-control-service.js";
 
 type SmokeCaseId = "CASE-01" | "CASE-02" | "CASE-03";
 
@@ -32,10 +32,8 @@ export interface ManualSmokeConfig {
   cases: SmokeCasePlan[];
 }
 
-interface SmokeServiceLike {
-  preview(input: unknown): PreviewResponse | MutationErrorResponse;
-  apply(input: unknown): Promise<ApplyResponse | MutationErrorResponse>;
-}
+type SmokeServiceLike = Pick<AppwriteControlService, "preview" | "apply">;
+type SmokePreviewResult = ReturnType<SmokeServiceLike["preview"]>;
 
 interface CliIo {
   writeStdout: (line: string) => void;
@@ -203,6 +201,10 @@ const previewFailureCase = (
   target_results: []
 });
 
+const isPreviewFailure = (
+  preview: SmokePreviewResult
+): preview is MutationErrorResponse => "error" in preview;
+
 const buildCaseResult = (
   casePlan: SmokeCasePlan,
   applyResult: ApplyResponse | MutationErrorResponse
@@ -261,7 +263,7 @@ export const runManualSmokeSuite = async (
   for (const casePlan of config.cases) {
     const previewInput = buildPreviewRequest(config, casePlan);
     const preview = service.preview(previewInput);
-    if (preview.status === "FAILED") {
+    if (isPreviewFailure(preview)) {
       caseResults.push(previewFailureCase(casePlan, preview));
       continue;
     }
