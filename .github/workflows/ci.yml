@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  schedule:
+    - cron: "30 17 * * *"
+  workflow_dispatch:
+    inputs:
+      run_live_e2e:
+        description: "Run live Appwrite e2e tests"
+        required: false
+        default: "false"
+      run_openapi_online:
+        description: "Run online Appwrite OpenAPI contract guard"
+        required: false
+        default: "false"
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+
+  openapi-contract-online:
+    if: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.run_openapi_online == 'true') || github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    needs: test-and-build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - run: npm run test:openapi:online
+
+  live-e2e:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.run_live_e2e == 'true' }}
+    runs-on: ubuntu-latest
+    needs: test-and-build
+    env:
+      APPWRITE_MCP_ENABLE_LIVE_E2E: "true"
+      APPWRITE_PROJECT_AUTH_FILE: ${{ github.workspace }}/.ci/project-auth.json
+      APPWRITE_LIVE_TARGET_PROJECT_ID: ${{ secrets.APPWRITE_LIVE_TARGET_PROJECT_ID }}
+      APPWRITE_MCP_CONFIRM_SECRET: ${{ secrets.APPWRITE_MCP_CONFIRM_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+      - run: npm ci
+      - name: Preflight required secrets
+        run: |
+          test -n "$APPWRITE_LIVE_TARGET_PROJECT_ID" || (echo "APPWRITE_LIVE_TARGET_PROJECT_ID is required" && exit 1)
+          test -n "$APPWRITE_MCP_CONFIRM_SECRET" || (echo "APPWRITE_MCP_CONFIRM_SECRET is required" && exit 1)
+          test -n "$APPWRITE_PROJECT_AUTH_FILE_JSON" || (echo "APPWRITE_PROJECT_AUTH_FILE_JSON is required" && exit 1)
+        env:
+          APPWRITE_PROJECT_AUTH_FILE_JSON: ${{ secrets.APPWRITE_PROJECT_AUTH_FILE_JSON }}
+      - name: Write auth file from secret
+        run: mkdir -p .ci && printf '%s' "${APPWRITE_PROJECT_AUTH_FILE_JSON}" > .ci/project-auth.json
+        env:
+          APPWRITE_PROJECT_AUTH_FILE_JSON: ${{ secrets.APPWRITE_PROJECT_AUTH_FILE_JSON }}
+      - run: npm run test:e2e:live

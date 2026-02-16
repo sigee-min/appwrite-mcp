@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (without v prefix, e.g. 0.2.0)"
+        required: true
+      run_openapi_online:
+        description: "Run online OpenAPI contract guard before release"
+        required: false
+        default: "true"
+      run_live_e2e:
+        description: "Run live e2e gate before release"
+        required: false
+        default: "false"
+
+jobs:
+  validate-and-release:
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ github.event.inputs.version }}
+      APPWRITE_PROJECT_AUTH_FILE: ${{ github.workspace }}/.ci/project-auth.json
+      APPWRITE_MCP_ENABLE_LIVE_E2E: "true"
+      APPWRITE_LIVE_TARGET_PROJECT_ID: ${{ secrets.APPWRITE_LIVE_TARGET_PROJECT_ID }}
+      APPWRITE_MCP_CONFIRM_SECRET: ${{ secrets.APPWRITE_MCP_CONFIRM_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Validate version input
+        run: |
+          echo "$VERSION" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' >/dev/null || (echo "version must be semver x.y.z" && exit 1)
+
+      - name: Ensure tag does not already exist
+        run: |
+          git fetch --tags
+          git rev-parse "v$VERSION" >/dev/null 2>&1 && (echo "tag v$VERSION already exists" && exit 1) || true
+
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+
+      - name: Optional online OpenAPI contract guard
+        if: ${{ github.event.inputs.run_openapi_online == 'true' }}
+        run: npm run test:openapi:online
+
+      - name: Optional live e2e preflight
+        if: ${{ github.event.inputs.run_live_e2e == 'true' }}
+        run: |
+          test -n "$APPWRITE_LIVE_TARGET_PROJECT_ID" || (echo "APPWRITE_LIVE_TARGET_PROJECT_ID is required" && exit 1)
+          test -n "$APPWRITE_MCP_CONFIRM_SECRET" || (echo "APPWRITE_MCP_CONFIRM_SECRET is required" && exit 1)
+          test -n "$APPWRITE_PROJECT_AUTH_FILE_JSON" || (echo "APPWRITE_PROJECT_AUTH_FILE_JSON is required" && exit 1)
+        env:
+          APPWRITE_PROJECT_AUTH_FILE_JSON: ${{ secrets.APPWRITE_PROJECT_AUTH_FILE_JSON }}
+
+      - name: Optional live e2e execution
+        if: ${{ github.event.inputs.run_live_e2e == 'true' }}
+        run: |
+          mkdir -p .ci
+          printf '%s' "$APPWRITE_PROJECT_AUTH_FILE_JSON" > .ci/project-auth.json
+          npm run test:e2e:live
+        env:
+          APPWRITE_PROJECT_AUTH_FILE_JSON: ${{ secrets.APPWRITE_PROJECT_AUTH_FILE_JSON }}
+
+      - name: Create git tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.event.inputs.version }}
+          generate_release_notes: true
