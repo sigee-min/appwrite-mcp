@@ -6,9 +6,6 @@ permissions:
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: "Release version (without v prefix, e.g. 0.2.0)"
-        required: true
       run_openapi_online:
         description: "Run online OpenAPI contract guard before release"
         required: false
@@ -22,11 +19,6 @@ jobs:
   validate-and-release:
     runs-on: ubuntu-latest
     env:
-      VERSION: ${{ github.event.inputs.version }}
-      STDIO_BUNDLE_NAME: appwrite-mcp-v${{ github.event.inputs.version }}-node20-stdio.tgz
-      STDIO_BUNDLE_SHA256: appwrite-mcp-v${{ github.event.inputs.version }}-node20-stdio.tgz.sha256
-      NPX_BUNDLE_NAME: appwrite-mcp-v${{ github.event.inputs.version }}-npx.tgz
-      NPX_BUNDLE_SHA256: appwrite-mcp-v${{ github.event.inputs.version }}-npx.tgz.sha256
       NPX_LATEST_NAME: appwrite-mcp-npx.tgz
       NPX_LATEST_SHA256: appwrite-mcp-npx.tgz.sha256
     steps:
@@ -37,14 +29,15 @@ jobs:
           node-version: "20"
           cache: "npm"
 
-      - name: Validate version input
+      - name: Resolve release version from package.json
         run: |
+          VERSION="$(node -e "const fs=require('fs');const pkg=JSON.parse(fs.readFileSync('package.json','utf8'));process.stdout.write(pkg.version)")"
           echo "$VERSION" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' >/dev/null || (echo "version must be semver x.y.z" && exit 1)
-
-      - name: Validate package version matches release input
-        run: |
-          PACKAGE_VERSION="$(node -e "const fs=require('fs');const pkg=JSON.parse(fs.readFileSync('package.json','utf8'));process.stdout.write(pkg.version)")"
-          test "$PACKAGE_VERSION" = "$VERSION" || (echo "package.json version ($PACKAGE_VERSION) must match release input ($VERSION)" && exit 1)
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "STDIO_BUNDLE_NAME=appwrite-mcp-v${VERSION}-node20-stdio.tgz" >> "$GITHUB_ENV"
+          echo "STDIO_BUNDLE_SHA256=appwrite-mcp-v${VERSION}-node20-stdio.tgz.sha256" >> "$GITHUB_ENV"
+          echo "NPX_BUNDLE_NAME=appwrite-mcp-v${VERSION}-npx.tgz" >> "$GITHUB_ENV"
+          echo "NPX_BUNDLE_SHA256=appwrite-mcp-v${VERSION}-npx.tgz.sha256" >> "$GITHUB_ENV"
 
       - name: Ensure tag does not already exist
         run: |
@@ -128,7 +121,7 @@ jobs:
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ github.event.inputs.version }}
+          tag_name: v${{ env.VERSION }}
           generate_release_notes: true
           files: |
             ${{ env.STDIO_BUNDLE_NAME }}

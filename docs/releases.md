@@ -26,11 +26,14 @@ This runbook standardizes staging, canary, and production promotion.
    - `npm run test:openapi:online`
 2. Optional live validation
    - `npm run test:e2e:live`
-3. Trigger GitHub release workflow
+3. Bump package version
+   - Update `package.json` version using semver (example: `0.1.1`).
+   - Keep `package-lock.json` version in sync.
+4. Trigger GitHub release workflow
    - Workflow: `release.yml`
-   - Input: semantic version without `v` prefix (example: `0.2.0`)
+   - Release version is derived automatically from `package.json`.
    - Optional: enable online contract check and live e2e gates.
-4. Confirm release artifacts
+5. Confirm release artifacts
    - Tag `v<version>` created.
    - GitHub release entry published with generated notes.
    - Release assets published:
