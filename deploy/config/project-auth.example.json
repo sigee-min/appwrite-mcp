@@ -3,13 +3,11 @@
   "projects": {
     "PROJECT_A": {
       "api_key": "sk_example_project_a",
-      "scopes": ["users.read", "users.write"],
       "aliases": ["prod", "main"],
       "default_for_auto": true
     },
     "PROJECT_B": {
-      "api_key": "sk_example_project_b",
-      "scopes": ["users.read"]
+      "api_key": "sk_example_project_b"
     }
   },
   "defaults": {
@@ -17,5 +15,10 @@
     "target_selector": {
       "mode": "auto"
     }
+  },
+  "management": {
+    "endpoint": "https://cloud.appwrite.io/v1",
+    "api_key": "sk_example_management",
+    "project_id": "console"
   }
 }
