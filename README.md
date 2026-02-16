@@ -185,6 +185,25 @@ APPWRITE_PROJECT_AUTH_FILE=/path/to/project-auth.json npm run dev
 
 `stdio` is the default transport.
 
+## OpenCode MCP via GitHub Release (stdio)
+
+Each GitHub release publishes runnable stdio bundle assets:
+
+- `appwrite-mcp-v<version>-node20-stdio.tgz`
+- `appwrite-mcp-v<version>-node20-stdio.tgz.sha256`
+
+Typical runtime flow for OpenCode local MCP:
+
+1. Download/extract release bundle to a local cache directory.
+2. Provide `APPWRITE_PROJECT_AUTH_FILE` and `APPWRITE_MCP_CONFIRM_SECRET` from your local launcher script.
+3. Start server with:
+
+```bash
+node dist/index.js
+```
+
+Then point OpenCode `mcp.<name>.command` to that launcher script (`type: "local"`).
+
 ## Run (streamable-http)
 
 Enable and select `streamable-http`:

@@ -33,6 +33,26 @@ This runbook standardizes staging, canary, and production promotion.
 4. Confirm release artifacts
    - Tag `v<version>` created.
    - GitHub release entry published with generated notes.
+   - Release assets published:
+     - `appwrite-mcp-v<version>-node20-stdio.tgz`
+     - `appwrite-mcp-v<version>-node20-stdio.tgz.sha256`
+
+## Release Asset Runtime Contract
+
+The stdio release bundle includes:
+
+- `dist/`
+- `node_modules/` (production-only dependencies)
+- `package.json`
+- `package-lock.json`
+- `README.md`
+- `LICENSE`
+
+Expected startup command from extracted bundle root:
+
+```bash
+node dist/index.js
+```
 
 ## Rollback Steps
 
