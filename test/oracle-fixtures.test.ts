@@ -85,9 +85,11 @@ interface ServiceBuildOptions {
   endpoint?: string | null;
   apiKey?: string | null;
   projectAuthContexts?: Record<string, AuthContext>;
+  managementAuthContext?: AuthContext;
   knownProjectIds?: string[];
   autoTargetProjectIds?: string[];
   defaultTargetSelector?: { mode?: "auto" | "alias" | "project_id"; value?: string; values?: string[] };
+  disallowLegacyAuthUsersUpdate?: boolean;
 }
 
 const buildService = (options: ServiceBuildOptions = {}) => {
@@ -100,6 +102,14 @@ const buildService = (options: ServiceBuildOptions = {}) => {
       : (options.endpoint ?? undefined);
   const apiKey =
     options.apiKey === undefined ? "sk_test_key" : (options.apiKey ?? undefined);
+  const defaultManagementAuthContext =
+    options.projectManagementAvailable ?? true
+      ? {
+          endpoint,
+          api_key: apiKey,
+          scopes: ["projects.write"]
+        }
+      : undefined;
 
   const service = new AppwriteControlService({
     adapter,
@@ -110,20 +120,25 @@ const buildService = (options: ServiceBuildOptions = {}) => {
       scopes:
         options.scopes ??
         [
+          "databases.read",
           "databases.write",
           "users.read",
           "users.write",
+          "functions.read",
           "functions.write",
           "projects.write"
         ]
     },
     projectAuthContexts: options.projectAuthContexts,
+    managementAuthContext:
+      options.managementAuthContext ?? defaultManagementAuthContext,
     confirmationSecret: "test-confirmation-secret",
     aliasMap: options.aliasMap ?? {},
     projectManagementAvailable: options.projectManagementAvailable ?? true,
     knownProjectIds: options.knownProjectIds,
     autoTargetProjectIds: options.autoTargetProjectIds,
     defaultTargetSelector: options.defaultTargetSelector,
+    disallowLegacyAuthUsersUpdate: options.disallowLegacyAuthUsersUpdate,
     transportDefault: "stdio",
     supportedTransports: options.supportedTransports ?? ["stdio"],
     requestedTransport: options.requestedTransport,
@@ -201,7 +216,7 @@ const createRuntimeAuthFile = (
     string,
     {
       api_key: string;
-      scopes: string[];
+      scopes?: string[];
       endpoint?: string;
     }
   >,
@@ -345,7 +360,11 @@ describe("ORC fixtures", () => {
       operation_id: "op-project-create",
       domain: "project",
       action: "project.create",
-      params: { name: "new-service" },
+      params: {
+        projectId: "proj-new-service",
+        teamId: "team-main",
+        name: "new-service"
+      },
       required_scopes: ["projects.write"]
     });
 
@@ -378,7 +397,11 @@ describe("ORC fixtures", () => {
       operation_id: "op-project-create",
       domain: "project",
       action: "project.create",
-      params: { name: "new-service" },
+      params: {
+        projectId: "proj-new-service",
+        teamId: "team-main",
+        name: "new-service"
+      },
       required_scopes: ["projects.write"]
     });
 
@@ -404,6 +427,50 @@ describe("ORC fixtures", () => {
     expect(apply.target_results[0].operations[0].error?.code).toBe(
       "CAPABILITY_UNAVAILABLE"
     );
+  });
+
+  it("ORC-FX-006A: project actions use dedicated management auth context", async () => {
+    const { service, adapter } = buildService({
+      managementAuthContext: {
+        endpoint: "https://management.appwrite.test/v1",
+        api_key: "sk_management",
+        scopes: ["projects.write"]
+      },
+      projectManagementAvailable: true
+    });
+
+    const operation = baseOperation({
+      operation_id: "op-project-create-managed",
+      domain: "project",
+      action: "project.create",
+      params: {
+        projectId: "proj-managed",
+        teamId: "team-main",
+        name: "managed-project"
+      },
+      required_scopes: ["projects.write"]
+    });
+
+    const preview = expectPreviewSuccess(
+      service.preview({
+        actor: "tester",
+        targets: [{ project_id: "P_A" }],
+        operations: [operation]
+      })
+    );
+
+    const apply = expectApplySuccess(
+      await service.apply({
+        actor: "tester",
+        targets: [{ project_id: "P_A" }],
+        operations: [operation],
+        plan_id: preview.plan_id,
+        plan_hash: preview.plan_hash
+      })
+    );
+
+    expect(apply.status).toBe("SUCCESS");
+    expect(adapter.calls[0]?.auth_context.api_key).toBe("sk_management");
   });
 
   it("ORC-FX-007: policy B auto-applies NON_CRITICAL destructive operations", async () => {
@@ -498,6 +565,12 @@ describe("ORC fixtures", () => {
 
     const operations: MutationOperation[] = [
       baseOperation({
+        operation_id: "op-db-list",
+        action: "database.list",
+        params: { limit: 10 },
+        required_scopes: ["databases.read"]
+      }),
+      baseOperation({
         operation_id: "op-db-upsert",
         action: "database.upsert_collection",
         params: { database_id: "db-main", collection_id: "users" }
@@ -522,6 +595,13 @@ describe("ORC fixtures", () => {
         action: "auth.users.update",
         params: { user_id: "u_01", name: "updated" },
         required_scopes: ["users.write"]
+      }),
+      baseOperation({
+        operation_id: "op-fn-list",
+        domain: "function",
+        action: "function.list",
+        params: { limit: 10 },
+        required_scopes: ["functions.read"]
       }),
       baseOperation({
         operation_id: "op-fn-create",
@@ -582,6 +662,88 @@ describe("ORC fixtures", () => {
     expect(adapter.calls.map((call) => call.operation.action)).toEqual(
       operations.map((operation) => operation.action)
     );
+  });
+
+  it("ORC-FX-009A: supports explicit auth.users.update.email action", async () => {
+    const { service, adapter } = buildService();
+
+    const operation = baseOperation({
+      operation_id: "op-user-update-email",
+      domain: "auth",
+      action: "auth.users.update.email",
+      params: { user_id: "u_01", email: "updated@example.com" },
+      required_scopes: ["users.write"]
+    });
+
+    const preview = expectPreviewSuccess(
+      service.preview({
+        actor: "tester",
+        targets: [{ project_id: "P_A" }],
+        operations: [operation]
+      })
+    );
+
+    const apply = expectApplySuccess(
+      await service.apply({
+        actor: "tester",
+        targets: [{ project_id: "P_A" }],
+        operations: [operation],
+        plan_id: preview.plan_id,
+        plan_hash: preview.plan_hash
+      })
+    );
+
+    expect(apply.status).toBe("SUCCESS");
+    expect(adapter.calls[0]?.operation.action).toBe("auth.users.update.email");
+  });
+
+  it("ORC-FX-009B: legacy auth.users.update remains supported with deprecation summary", () => {
+    const { service } = buildService();
+
+    const preview = expectPreviewSuccess(
+      service.preview({
+        actor: "tester",
+        targets: [{ project_id: "P_A" }],
+        operations: [
+          baseOperation({
+            operation_id: "op-user-update-legacy",
+            domain: "auth",
+            action: "auth.users.update",
+            params: { user_id: "u_01", name: "legacy-update" },
+            required_scopes: ["users.write"]
+          })
+        ]
+      })
+    );
+
+    expect(preview.summary).toContain("legacy_auth_users_update=1 (deprecated)");
+  });
+
+  it("ORC-FX-009C: legacy auth.users.update can be disabled by policy", () => {
+    const { service } = buildService({
+      disallowLegacyAuthUsersUpdate: true
+    });
+
+    const preview = service.preview({
+      actor: "tester",
+      targets: [{ project_id: "P_A" }],
+      operations: [
+        baseOperation({
+          operation_id: "op-user-update-legacy",
+          domain: "auth",
+          action: "auth.users.update",
+          params: { user_id: "u_01", name: "legacy-update" },
+          required_scopes: ["users.write"]
+        })
+      ]
+    });
+
+    if (!isMutationFailure(preview)) {
+      throw new Error("expected legacy action policy failure");
+    }
+
+    expect(preview.error.code).toBe("VALIDATION_ERROR");
+    expect(preview.error.message).toContain("deprecated");
   });
 
   it("ORC-FX-010: validates scopes before apply and passes explicit project context", async () => {
@@ -929,7 +1091,7 @@ describe("ORC fixtures", () => {
           default_endpoint: "https://example.appwrite.test/v1",
           projects: {
             P_A: {
-              api_key: "sk_project_a"
+              endpoint: "https://example.appwrite.test/v1"
             }
           }
         },
@@ -976,9 +1138,148 @@ describe("ORC fixtures", () => {
             APPWRITE_PROJECT_AUTH_FILE: schemaMissingNestedFilePath
           }
         })
-      ).toThrow(/APPWRITE_PROJECT_AUTH_FILE schema invalid at projects\.P_A\.scopes/);
+      ).toThrow(/APPWRITE_PROJECT_AUTH_FILE schema invalid at projects\.P_A\.api_key/);
     } finally {
       rmSync(brokenDir, { recursive: true, force: true });
+    }
+  });
+
+  it("ORC-FX-016E: project management flag requires management auth config", () => {
+    const authFile = createRuntimeAuthFile({
+      P_A: {
+        api_key: "sk_project_a",
+        scopes: ["projects.write", "users.read"]
+      }
+    });
+
+    try {
+      expect(() =>
+        buildAppwriteControlService({
+          argv: [],
+          env: {
+            APPWRITE_PROJECT_AUTH_FILE: authFile.filePath,
+            APPWRITE_MCP_ENABLE_PROJECT_MANAGEMENT: "true"
+          }
+        })
+      ).toThrow(
+        "APPWRITE_PROJECT_AUTH_FILE management config is required when APPWRITE_MCP_ENABLE_PROJECT_MANAGEMENT=true"
+      );
+    } finally {
+      authFile.cleanup();
+    }
+  });
+
+  it("ORC-FX-016F: startup fails on invalid HTTP retry config boundaries", () => {
+    const authFile = createRuntimeAuthFile({
+      P_A: {
+        api_key: "sk_project_a",
+        scopes: ["users.read"]
+      }
+    });
+
+    try {
+      expect(() =>
+        buildAppwriteControlService({
+          argv: [],
+          env: {
+            APPWRITE_PROJECT_AUTH_FILE: authFile.filePath,
+            APPWRITE_MCP_HTTP_RETRY_BASE_DELAY_MS: "1000",
+            APPWRITE_MCP_HTTP_RETRY_MAX_DELAY_MS: "100"
+          }
+        })
+      ).toThrow(
+        "APPWRITE_MCP_HTTP_RETRY_MAX_DELAY_MS must be >= APPWRITE_MCP_HTTP_RETRY_BASE_DELAY_MS"
+      );
+
+      expect(() =>
+        buildAppwriteControlService({
+          argv: [],
+          env: {
+            APPWRITE_PROJECT_AUTH_FILE: authFile.filePath,
+            APPWRITE_MCP_HTTP_RETRY_STATUS_CODES: "200,abc"
+          }
+        })
+      ).toThrow(
+        "APPWRITE_MCP_HTTP_RETRY_STATUS_CODES must be a comma-separated list of HTTP status codes"
+      );
+    } finally {
+      authFile.cleanup();
+    }
+  });
+
+  it("ORC-FX-016G: disallow legacy auth users update policy is loaded from environment", () => {
+    const authFile = createRuntimeAuthFile({
+      P_A: {
+        api_key: "sk_project_a",
+        scopes: ["users.write"]
+      }
+    });
+
+    try {
+      const service = buildAppwriteControlService({
+        argv: [],
+        env: {
+          APPWRITE_PROJECT_AUTH_FILE: authFile.filePath,
+          APPWRITE_MCP_DISALLOW_LEGACY_AUTH_USERS_UPDATE: "true"
+        }
+      });
+
+      const preview = service.preview({
+        actor: "tester",
+        targets: [{ project_id: "P_A" }],
+        operations: [
+          {
+            operation_id: "op-user-update-legacy",
+            domain: "auth",
+            action: "auth.users.update",
+            params: { user_id: "u_01", name: "legacy" }
+          }
+        ]
+      });
+
+      if (!isMutationFailure(preview)) {
+        throw new Error("expected preview failure when legacy action policy is enabled");
+      }
+      expect(preview.error.code).toBe("VALIDATION_ERROR");
+    } finally {
+      authFile.cleanup();
+    }
+  });
+
+  it("ORC-FX-016H: startup accepts auth file entries without scopes", () => {
+    const authFile = createRuntimeAuthFile({
+      P_A: {
+        api_key: "sk_project_a"
+      }
+    });
+
+    try {
+      const service = buildAppwriteControlService({
+        argv: [],
+        env: {
+          APPWRITE_PROJECT_AUTH_FILE: authFile.filePath
+        }
+      });
+
+      const preview = service.preview({
+        actor: "tester",
+        targets: [{ project_id: "P_A" }],
+        operations: [
+          {
+            operation_id: "op-users-list",
+            domain: "auth",
+            action: "auth.users.list",
+            params: { limit: 1 }
+          }
+        ]
+      });
+
+      if (isMutationFailure(preview)) {
+        throw new Error(`expected preview success, got ${preview.error.code}`);
+      }
+      expect(preview.status).toBe("SUCCESS");
+    } finally {
+      authFile.cleanup();
     }
   });
 
@@ -1036,7 +1337,7 @@ describe("ORC fixtures", () => {
         P_B: {
           endpoint: "https://example.appwrite.test/v1",
           api_key: "sk_project_b",
-          scopes: []
+          scopes: ["users.read"]
         }
       }
     });

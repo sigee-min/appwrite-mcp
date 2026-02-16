@@ -19,6 +19,7 @@ interface MutationExecutorOptions {
   adapter: AppwriteAdapter;
   auditLogger: AuditLogger;
   projectManagementAvailable: boolean;
+  managementAuthContext?: AuthContext;
   now: () => Date;
 }
 
@@ -76,36 +77,6 @@ export class MutationExecutor {
         continue;
       }
 
-      const missingScopes = this.findMissingScopes(
-        plan.required_scopes,
-        authContext.scopes
-      );
-      if (missingScopes.length > 0) {
-        results.push({
-          target: target.source,
-          project_id: target.project_id,
-          status: "FAILED",
-          operations: this.buildTargetPreflightFailures(
-            request.actor,
-            target.project_id,
-            correlationId,
-            request.operations,
-            new AppwriteMcpError(
-              "MISSING_SCOPE",
-              "required scopes are missing for target",
-              {
-                target: target.project_id,
-                operation_id: "*",
-                missing_scopes: missingScopes,
-                remediation:
-                  "Add required scopes to the project auth file entry and retry"
-              }
-            )
-          )
-        });
-        continue;
-      }
-
       const operationResults: TargetOperationResult[] = [];
 
       for (const operation of request.operations) {
@@ -157,17 +128,48 @@ export class MutationExecutor {
     correlationId: string,
     authContext: AuthContext
   ): Promise<TargetOperationResult> {
-    if (
-      operation.action === "project.create" &&
-      !this.options.projectManagementAvailable
-    ) {
+    const effectiveAuthContext = this.resolveOperationAuthContext(
+      operation,
+      targetProjectId,
+      authContext
+    );
+    if (effectiveAuthContext instanceof AppwriteMcpError) {
+      return this.logAndBuildFailure(
+        actor,
+        targetProjectId,
+        correlationId,
+        operation.operation_id,
+        toStandardError(effectiveAuthContext)
+      );
+    }
+
+    const authContextError = this.validateTargetAuthContext(
+      effectiveAuthContext,
+      targetProjectId
+    );
+    if (authContextError) {
+      return this.logAndBuildFailure(
+        actor,
+        targetProjectId,
+        correlationId,
+        operation.operation_id,
+        toStandardError(authContextError)
+      );
+    }
+
+    const missingScopes = this.findMissingScopes(
+      operation.required_scopes ?? [],
+      effectiveAuthContext.scopes
+    );
+    if (missingScopes.length > 0) {
       const capabilityError = new AppwriteMcpError(
-        "CAPABILITY_UNAVAILABLE",
-        "project management channel is not configured",
+        "MISSING_SCOPE",
+        "required scopes are missing for operation",
         {
           target: targetProjectId,
           operation_id: operation.operation_id,
-          remediation: "Enable project management channel before retry"
+          missing_scopes: missingScopes,
+          remediation: "Use an API key with required permissions and retry"
         }
       );
 
@@ -201,7 +203,7 @@ export class MutationExecutor {
     const execution = await this.options.adapter.executeOperation({
       target_project_id: targetProjectId,
       operation,
-      auth_context: authContext,
+      auth_context: effectiveAuthContext,
       correlation_id: correlationId
     });
 
@@ -319,10 +321,51 @@ export class MutationExecutor {
     );
   }
 
+  private resolveOperationAuthContext(
+    operation: MutationOperation,
+    targetProjectId: string,
+    targetAuthContext: AuthContext
+  ): AuthContext | AppwriteMcpError {
+    if (!operation.action.startsWith("project.")) {
+      return targetAuthContext;
+    }
+
+    if (!this.options.projectManagementAvailable) {
+      return new AppwriteMcpError(
+        "CAPABILITY_UNAVAILABLE",
+        "project management channel is not configured",
+        {
+          target: targetProjectId,
+          operation_id: operation.operation_id,
+          remediation: "Enable project management channel before retry"
+        }
+      );
+    }
+
+    if (this.options.managementAuthContext) {
+      return this.options.managementAuthContext;
+    }
+
+    return new AppwriteMcpError(
+      "CAPABILITY_UNAVAILABLE",
+      "project management auth context is not configured",
+      {
+        target: targetProjectId,
+        operation_id: operation.operation_id,
+        remediation:
+          "Configure management.api_key in APPWRITE_PROJECT_AUTH_FILE and retry"
+      }
+    );
+  }
+
   private findMissingScopes(
     requiredScopes: string[],
     availableScopes: string[]
   ): string[] {
+    if (availableScopes.length === 0) {
+      return [];
+    }
+
     return requiredScopes.filter((scope) => !availableScopes.includes(scope));
   }
 

@@ -41,6 +41,8 @@ interface AppwriteControlServiceOptions {
   auditLogger: AuditLogger;
   authContext: AuthContext;
   projectAuthContexts?: Record<string, AuthContext>;
+  managementAuthContext?: AuthContext;
+  managementProjectId?: string;
   confirmationSecret: string;
   aliasMap?: Record<string, string>;
   knownProjectIds?: string[];
@@ -50,6 +52,7 @@ interface AppwriteControlServiceOptions {
   supportedTransports?: TransportName[];
   requestedTransport?: TransportName;
   projectManagementAvailable?: boolean;
+  disallowLegacyAuthUsersUpdate?: boolean;
   now?: () => Date;
   randomId?: () => string;
   planTtlSeconds?: number;
@@ -70,6 +73,7 @@ export class AppwriteControlService {
   private readonly projectAuthContexts: Record<string, AuthContext>;
   private readonly knownProjectIds: string[];
   private readonly auditLogger: AuditLogger;
+  private readonly disallowLegacyAuthUsersUpdate: boolean;
 
   constructor(options: AppwriteControlServiceOptions) {
     const knownProjectIds = options.knownProjectIds ?? Object.keys(options.projectAuthContexts ?? {});
@@ -92,6 +96,8 @@ export class AppwriteControlService {
     this.projectAuthContexts = { ...(options.projectAuthContexts ?? {}) };
     this.knownProjectIds = [...knownProjectIds];
     this.auditLogger = options.auditLogger;
+    this.disallowLegacyAuthUsersUpdate =
+      options.disallowLegacyAuthUsersUpdate ?? false;
 
     this.planManager = new PlanManager({
       now: this.now,
@@ -103,6 +109,7 @@ export class AppwriteControlService {
       adapter: options.adapter,
       auditLogger: options.auditLogger,
       projectManagementAvailable: this.projectManagementAvailable,
+      managementAuthContext: options.managementAuthContext,
       now: this.now
     });
   }
@@ -176,6 +183,7 @@ export class AppwriteControlService {
       );
 
       this.logPlanPreview(plan, normalizedRequest.actor, correlationId);
+      const legacyActionCount = this.countLegacyAuthUsersUpdate(normalizedRequest);
 
       return {
         correlation_id: correlationId,
@@ -192,7 +200,7 @@ export class AppwriteControlService {
           plan.target_projects.length,
           plan.destructive_count,
           plan.risk_level
-        )}, source=${resolved.source}`
+        )}${this.legacyActionSummarySuffix(legacyActionCount)}, source=${resolved.source}`
       };
     } catch (error) {
       return this.mapError(error, "preview", correlationId);
@@ -230,6 +238,7 @@ export class AppwriteControlService {
         correlationId,
         (targetProjectId) => this.resolveAuthContextForTarget(targetProjectId)
       );
+      const legacyActionCount = this.countLegacyAuthUsersUpdate(normalizedRequest);
 
       const status = this.toTopLevelStatus(targetResults);
       return {
@@ -246,7 +255,7 @@ export class AppwriteControlService {
           plan.destructive_count,
           plan.risk_level,
           status
-        )}, source=${resolved.source}`
+        )}${this.legacyActionSummarySuffix(legacyActionCount)}, source=${resolved.source}`
       };
     } catch (error) {
       return this.mapError(error, "apply", correlationId);
@@ -584,6 +593,10 @@ export class AppwriteControlService {
   }
 
   private preflightScopes(requiredScopes: string[], availableScopes: string[]): void {
+    if (availableScopes.length === 0) {
+      return;
+    }
+
     const missingScopes = requiredScopes.filter(
       (scope) => !availableScopes.includes(scope)
     );
@@ -596,15 +609,45 @@ export class AppwriteControlService {
       target: "scope",
       operation_id: "*",
       missing_scopes: missingScopes,
-      remediation: "Issue an API key with all required_scopes"
+      remediation: "Use an API key with required permissions"
     });
   }
 
   private normalizeRequestOperations(request: MutationRequest): MutationRequest {
+    if (
+      this.disallowLegacyAuthUsersUpdate &&
+      request.operations.some((operation) => operation.action === "auth.users.update")
+    ) {
+      throw new AppwriteMcpError(
+        "VALIDATION_ERROR",
+        "auth.users.update is deprecated; use explicit auth.users.update.* actions",
+        {
+          target: "operations",
+          operation_id: "*",
+          remediation:
+            "Replace auth.users.update with auth.users.update.email/name/status/password/phone/email_verification/phone_verification/mfa/labels/prefs"
+        }
+      );
+    }
+
     return {
       ...request,
       operations: withInferredRequiredScopes(request.operations)
     };
+  }
+
+  private countLegacyAuthUsersUpdate(request: MutationRequest): number {
+    return request.operations.filter(
+      (operation) => operation.action === "auth.users.update"
+    ).length;
+  }
+
+  private legacyActionSummarySuffix(legacyActionCount: number): string {
+    if (legacyActionCount === 0) {
+      return "";
+    }
+
+    return `, legacy_auth_users_update=${legacyActionCount} (deprecated)`;
   }
 
   private targetResolverAliases(): number {

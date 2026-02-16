@@ -23,6 +23,14 @@ export interface RuntimeServerConfig {
   streamableHttpPath: string;
 }
 
+interface HttpAdapterRuntimeConfig {
+  timeoutMs: number;
+  maxRetries: number;
+  retryBaseDelayMs: number;
+  retryMaxDelayMs: number;
+  retryStatusCodes: number[];
+}
+
 const DEFAULT_CONFIRM_SECRET = "appwrite-mcp-dev-secret";
 
 const parseBoolean = (value: string | undefined): boolean =>
@@ -79,6 +87,102 @@ const parsePort = (value: string | undefined): number => {
   }
 
   return parsed;
+};
+
+const parsePositiveInt = (
+  value: string | undefined,
+  envName: string,
+  fallback: number
+): number => {
+  if (!value || value.trim().length === 0) {
+    return fallback;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new Error(`${envName} must be an integer >= 1`);
+  }
+
+  return parsed;
+};
+
+const parseNonNegativeInt = (
+  value: string | undefined,
+  envName: string,
+  fallback: number
+): number => {
+  if (!value || value.trim().length === 0) {
+    return fallback;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(`${envName} must be an integer >= 0`);
+  }
+
+  return parsed;
+};
+
+const parseRetryStatusCodes = (value: string | undefined): number[] => {
+  if (!value || value.trim().length === 0) {
+    return [408, 425, 429, 500, 502, 503, 504];
+  }
+
+  const parsed = value
+    .split(",")
+    .map((token) => token.trim())
+    .filter((token) => token.length > 0)
+    .map((token) => Number.parseInt(token, 10));
+
+  if (
+    parsed.length === 0 ||
+    parsed.some((statusCode) => !Number.isInteger(statusCode) || statusCode < 100 || statusCode > 599)
+  ) {
+    throw new Error(
+      "APPWRITE_MCP_HTTP_RETRY_STATUS_CODES must be a comma-separated list of HTTP status codes"
+    );
+  }
+
+  return [...new Set(parsed)];
+};
+
+const parseHttpAdapterRuntimeConfig = (
+  env: NodeJS.ProcessEnv
+): HttpAdapterRuntimeConfig => {
+  const timeoutMs = parsePositiveInt(
+    env.APPWRITE_MCP_HTTP_TIMEOUT_MS,
+    "APPWRITE_MCP_HTTP_TIMEOUT_MS",
+    10_000
+  );
+  const maxRetries = parseNonNegativeInt(
+    env.APPWRITE_MCP_HTTP_MAX_RETRIES,
+    "APPWRITE_MCP_HTTP_MAX_RETRIES",
+    2
+  );
+  const retryBaseDelayMs = parsePositiveInt(
+    env.APPWRITE_MCP_HTTP_RETRY_BASE_DELAY_MS,
+    "APPWRITE_MCP_HTTP_RETRY_BASE_DELAY_MS",
+    100
+  );
+  const retryMaxDelayMs = parsePositiveInt(
+    env.APPWRITE_MCP_HTTP_RETRY_MAX_DELAY_MS,
+    "APPWRITE_MCP_HTTP_RETRY_MAX_DELAY_MS",
+    2_000
+  );
+
+  if (retryMaxDelayMs < retryBaseDelayMs) {
+    throw new Error(
+      "APPWRITE_MCP_HTTP_RETRY_MAX_DELAY_MS must be >= APPWRITE_MCP_HTTP_RETRY_BASE_DELAY_MS"
+    );
+  }
+
+  return {
+    timeoutMs,
+    maxRetries,
+    retryBaseDelayMs,
+    retryMaxDelayMs,
+    retryStatusCodes: parseRetryStatusCodes(env.APPWRITE_MCP_HTTP_RETRY_STATUS_CODES)
+  };
 };
 
 const normalizeHttpPath = (value: string | undefined): string => {
@@ -144,7 +248,7 @@ export const resolveRuntimeServerConfig = (
 
 const projectAuthEntrySchema = z.object({
   api_key: z.string().min(1),
-  scopes: z.array(z.string().min(1)),
+  scopes: z.array(z.string().min(1)).optional().default([]),
   endpoint: z.string().min(1).optional(),
   aliases: z.array(z.string().min(1)).optional(),
   default_for_auto: z.boolean().optional(),
@@ -155,6 +259,13 @@ const targetSelectorSchema = z.object({
   mode: z.enum(["auto", "alias", "project_id"]).optional(),
   value: z.string().min(1).optional(),
   values: z.array(z.string().min(1)).optional()
+});
+
+const managementAuthSchema = z.object({
+  endpoint: z.string().min(1).optional(),
+  api_key: z.string().min(1),
+  scopes: z.array(z.string().min(1)).optional().default([]),
+  project_id: z.string().min(1).optional()
 });
 
 const projectAuthFileSchema = z.object({
@@ -169,12 +280,15 @@ const projectAuthFileSchema = z.object({
       auto_target_project_ids: z.array(z.string().min(1)).optional(),
       target_selector: targetSelectorSchema.optional()
     })
-    .optional()
+    .optional(),
+  management: managementAuthSchema.optional()
 });
 
 interface LoadedProjectAuthContexts {
   fallbackAuthContext: AuthContext;
   projectAuthContexts: Record<string, AuthContext>;
+  managementAuthContext?: AuthContext;
+  managementProjectId?: string;
   fileAliases: Record<string, string>;
   knownProjectIds: string[];
   autoTargetProjectIds: string[];
@@ -187,7 +301,7 @@ const toAuthContext = (
 ): AuthContext => ({
   endpoint: entry.endpoint ?? defaultEndpoint,
   api_key: entry.api_key,
-  scopes: [...entry.scopes]
+  scopes: [...(entry.scopes ?? [])]
 });
 
 const readProjectAuthFile = (filePath: string): LoadedProjectAuthContexts => {
@@ -266,6 +380,14 @@ const readProjectAuthFile = (filePath: string): LoadedProjectAuthContexts => {
   return {
     fallbackAuthContext: toAuthContext(authFile.default_endpoint, fallbackEntry),
     projectAuthContexts,
+    managementAuthContext: authFile.management
+      ? {
+          endpoint: authFile.management.endpoint ?? authFile.default_endpoint,
+          api_key: authFile.management.api_key,
+          scopes: [...(authFile.management.scopes ?? [])]
+        }
+      : undefined,
+    managementProjectId: authFile.management?.project_id,
     fileAliases,
     knownProjectIds,
     autoTargetProjectIds,
@@ -299,6 +421,15 @@ export const buildAppwriteControlService = (
     supportedTransports.push("streamable-http");
   }
 
+  const projectManagementEnabled = parseBoolean(
+    input.env.APPWRITE_MCP_ENABLE_PROJECT_MANAGEMENT
+  );
+  if (projectManagementEnabled && !loadedAuth.managementAuthContext) {
+    throw new Error(
+      "APPWRITE_PROJECT_AUTH_FILE management config is required when APPWRITE_MCP_ENABLE_PROJECT_MANAGEMENT=true"
+    );
+  }
+
   const confirmationSecret =
     input.env.APPWRITE_MCP_CONFIRM_SECRET ?? DEFAULT_CONFIRM_SECRET;
   if (input.env.NODE_ENV === "production" && confirmationSecret === DEFAULT_CONFIRM_SECRET) {
@@ -307,11 +438,15 @@ export const buildAppwriteControlService = (
     );
   }
 
+  const httpAdapterRuntimeConfig = parseHttpAdapterRuntimeConfig(input.env);
+
   return new AppwriteControlService({
-    adapter: new HttpAppwriteAdapter(),
+    adapter: new HttpAppwriteAdapter(httpAdapterRuntimeConfig),
     auditLogger: new InMemoryAuditLogger(),
     authContext: loadedAuth.fallbackAuthContext,
     projectAuthContexts: loadedAuth.projectAuthContexts,
+    managementAuthContext: loadedAuth.managementAuthContext,
+    managementProjectId: loadedAuth.managementProjectId,
     knownProjectIds: loadedAuth.knownProjectIds,
     autoTargetProjectIds: loadedAuth.autoTargetProjectIds,
     defaultTargetSelector: loadedAuth.defaultTargetSelector,
@@ -320,8 +455,9 @@ export const buildAppwriteControlService = (
       ...loadedAuth.fileAliases,
       ...parseAliases(input.env.APPWRITE_MCP_TARGET_ALIASES)
     },
-    projectManagementAvailable: parseBoolean(
-      input.env.APPWRITE_MCP_ENABLE_PROJECT_MANAGEMENT
+    projectManagementAvailable: projectManagementEnabled,
+    disallowLegacyAuthUsersUpdate: parseBoolean(
+      input.env.APPWRITE_MCP_DISALLOW_LEGACY_AUTH_USERS_UPDATE
     ),
     transportDefault: "stdio",
     supportedTransports,
