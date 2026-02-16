@@ -12,12 +12,24 @@ export type OperationDomain = "project" | "database" | "auth" | "function";
 export type OperationAction =
   | "project.create"
   | "project.delete"
+  | "database.list"
   | "database.create"
   | "database.upsert_collection"
   | "database.delete_collection"
   | "auth.users.list"
   | "auth.users.create"
+  | "auth.users.update.email"
+  | "auth.users.update.name"
+  | "auth.users.update.status"
+  | "auth.users.update.password"
+  | "auth.users.update.phone"
+  | "auth.users.update.email_verification"
+  | "auth.users.update.phone_verification"
+  | "auth.users.update.mfa"
+  | "auth.users.update.labels"
+  | "auth.users.update.prefs"
   | "auth.users.update"
+  | "function.list"
   | "function.create"
   | "function.update"
   | "function.deployment.trigger"
@@ -238,7 +250,7 @@ export interface AuthContext {
 
 export interface ProjectAuthEntry {
   api_key: string;
-  scopes: string[];
+  scopes?: string[];
   endpoint?: string;
   aliases?: string[];
   default_for_auto?: boolean;
@@ -248,6 +260,12 @@ export interface ProjectAuthEntry {
 export interface ProjectAuthFile {
   default_endpoint: string;
   projects: Record<string, ProjectAuthEntry>;
+  management?: {
+    endpoint?: string;
+    api_key: string;
+    scopes?: string[];
+    project_id?: string;
+  };
   defaults?: {
     auto_target_project_ids?: string[];
     target_selector?: TargetSelectorInput;
