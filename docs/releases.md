@@ -34,8 +34,12 @@ This runbook standardizes staging, canary, and production promotion.
    - Tag `v<version>` created.
    - GitHub release entry published with generated notes.
    - Release assets published:
-     - `appwrite-mcp-v<version>-node20-stdio.tgz`
-     - `appwrite-mcp-v<version>-node20-stdio.tgz.sha256`
+      - `appwrite-mcp-v<version>-node20-stdio.tgz`
+      - `appwrite-mcp-v<version>-node20-stdio.tgz.sha256`
+      - `appwrite-mcp-v<version>-npx.tgz`
+      - `appwrite-mcp-v<version>-npx.tgz.sha256`
+      - `appwrite-mcp-npx.tgz`
+      - `appwrite-mcp-npx.tgz.sha256`
 
 ## Release Asset Runtime Contract
 
@@ -52,6 +56,17 @@ Expected startup command from extracted bundle root:
 
 ```bash
 node dist/index.js
+```
+
+The npx release bundle is a packed npm artifact with a CLI bin:
+
+- command: `appwrite-mcp`
+- bin target: `dist/index.js`
+
+Expected startup command using latest alias:
+
+```bash
+npx -y --package https://github.com/sigee-min/appwrite-mcp/releases/latest/download/appwrite-mcp-npx.tgz appwrite-mcp
 ```
 
 ## Rollback Steps

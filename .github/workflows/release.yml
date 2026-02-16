@@ -23,8 +23,12 @@ jobs:
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ github.event.inputs.version }}
-      BUNDLE_NAME: appwrite-mcp-v${{ github.event.inputs.version }}-node20-stdio.tgz
-      BUNDLE_SHA256: appwrite-mcp-v${{ github.event.inputs.version }}-node20-stdio.tgz.sha256
+      STDIO_BUNDLE_NAME: appwrite-mcp-v${{ github.event.inputs.version }}-node20-stdio.tgz
+      STDIO_BUNDLE_SHA256: appwrite-mcp-v${{ github.event.inputs.version }}-node20-stdio.tgz.sha256
+      NPX_BUNDLE_NAME: appwrite-mcp-v${{ github.event.inputs.version }}-npx.tgz
+      NPX_BUNDLE_SHA256: appwrite-mcp-v${{ github.event.inputs.version }}-npx.tgz.sha256
+      NPX_LATEST_NAME: appwrite-mcp-npx.tgz
+      NPX_LATEST_SHA256: appwrite-mcp-npx.tgz.sha256
     steps:
       - uses: actions/checkout@v4
 
@@ -36,6 +40,11 @@ jobs:
       - name: Validate version input
         run: |
           echo "$VERSION" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' >/dev/null || (echo "version must be semver x.y.z" && exit 1)
+
+      - name: Validate package version matches release input
+        run: |
+          PACKAGE_VERSION="$(node -e "const fs=require('fs');const pkg=JSON.parse(fs.readFileSync('package.json','utf8'));process.stdout.write(pkg.version)")"
+          test "$PACKAGE_VERSION" = "$VERSION" || (echo "package.json version ($PACKAGE_VERSION) must match release input ($VERSION)" && exit 1)
 
       - name: Ensure tag does not already exist
         run: |
@@ -82,16 +91,32 @@ jobs:
           cp -R dist .release/appwrite-mcp/dist
           cp -R node_modules .release/appwrite-mcp/node_modules
           cp package.json package-lock.json LICENSE README.md .release/appwrite-mcp/
-          tar -czf "$BUNDLE_NAME" -C .release appwrite-mcp
-          shasum -a 256 "$BUNDLE_NAME" > "$BUNDLE_SHA256"
+          tar -czf "$STDIO_BUNDLE_NAME" -C .release appwrite-mcp
+          shasum -a 256 "$STDIO_BUNDLE_NAME" > "$STDIO_BUNDLE_SHA256"
 
       - name: Verify release bundle shape
         run: |
           rm -rf .release-check
           mkdir -p .release-check
-          tar -xzf "$BUNDLE_NAME" -C .release-check
+          tar -xzf "$STDIO_BUNDLE_NAME" -C .release-check
           test -f ".release-check/appwrite-mcp/dist/index.js" || (echo "dist/index.js missing in release bundle" && exit 1)
           test -d ".release-check/appwrite-mcp/node_modules" || (echo "node_modules missing in release bundle" && exit 1)
+
+      - name: Build release npx bundle
+        run: |
+          PACK_FILE="$(npm pack --silent)"
+          mv "$PACK_FILE" "$NPX_BUNDLE_NAME"
+          shasum -a 256 "$NPX_BUNDLE_NAME" > "$NPX_BUNDLE_SHA256"
+          cp "$NPX_BUNDLE_NAME" "$NPX_LATEST_NAME"
+          shasum -a 256 "$NPX_LATEST_NAME" > "$NPX_LATEST_SHA256"
+
+      - name: Verify release npx bundle shape
+        run: |
+          rm -rf .release-npx-check
+          mkdir -p .release-npx-check
+          tar -xzf "$NPX_BUNDLE_NAME" -C .release-npx-check
+          test -f ".release-npx-check/package/package.json" || (echo "package.json missing in npx bundle" && exit 1)
+          test -f ".release-npx-check/package/dist/index.js" || (echo "dist/index.js missing in npx bundle" && exit 1)
 
       - name: Create git tag
         run: |
@@ -106,5 +131,9 @@ jobs:
           tag_name: v${{ github.event.inputs.version }}
           generate_release_notes: true
           files: |
-            ${{ env.BUNDLE_NAME }}
-            ${{ env.BUNDLE_SHA256 }}
+            ${{ env.STDIO_BUNDLE_NAME }}
+            ${{ env.STDIO_BUNDLE_SHA256 }}
+            ${{ env.NPX_BUNDLE_NAME }}
+            ${{ env.NPX_BUNDLE_SHA256 }}
+            ${{ env.NPX_LATEST_NAME }}
+            ${{ env.NPX_LATEST_SHA256 }}
