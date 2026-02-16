@@ -1,9 +1,5 @@
 import { AppwriteMcpError, toStandardError } from "../domain/errors.js";
-import type {
-  MutationOperation,
-  OperationAction,
-  StandardError
-} from "../domain/types.js";
+import type { MutationOperation } from "../domain/types.js";
 import type {
   AdapterExecutionResult,
   AppwriteAdapter,
@@ -14,10 +10,42 @@ interface HttpOperationRequest {
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   path: string;
   body?: Record<string, unknown>;
+  formData?: FormData;
   query?: Record<string, string | number | boolean>;
+  omitProjectHeader?: boolean;
 }
 
+export interface HttpAppwriteAdapterOptions {
+  timeoutMs?: number;
+  maxRetries?: number;
+  retryBaseDelayMs?: number;
+  retryMaxDelayMs?: number;
+  retryStatusCodes?: number[];
+}
+
+const DEFAULT_TIMEOUT_MS = 10_000;
+const DEFAULT_MAX_RETRIES = 2;
+const DEFAULT_RETRY_BASE_DELAY_MS = 100;
+const DEFAULT_RETRY_MAX_DELAY_MS = 2_000;
+const DEFAULT_RETRY_STATUS_CODES = [408, 425, 429, 500, 502, 503, 504];
+
 export class HttpAppwriteAdapter implements AppwriteAdapter {
+  private readonly timeoutMs: number;
+  private readonly maxRetries: number;
+  private readonly retryBaseDelayMs: number;
+  private readonly retryMaxDelayMs: number;
+  private readonly retryStatusCodes: Set<number>;
+
+  constructor(options: HttpAppwriteAdapterOptions = {}) {
+    this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
+    this.retryBaseDelayMs = options.retryBaseDelayMs ?? DEFAULT_RETRY_BASE_DELAY_MS;
+    this.retryMaxDelayMs = options.retryMaxDelayMs ?? DEFAULT_RETRY_MAX_DELAY_MS;
+    this.retryStatusCodes = new Set(
+      options.retryStatusCodes ?? DEFAULT_RETRY_STATUS_CODES
+    );
+  }
+
   async executeOperation(
     input: AppwriteAdapterExecutionInput
   ): Promise<AdapterExecutionResult> {
@@ -89,45 +117,96 @@ export class HttpAppwriteAdapter implements AppwriteAdapter {
     }
 
     const headers: Record<string, string> = {
-      "Content-Type": "application/json",
       "X-Appwrite-Key": input.auth_context.api_key ?? "",
-      "X-Appwrite-Project": input.target_project_id,
       "X-Appwrite-Response-Format": "1.8.0"
     };
 
-    const response = await fetch(url, {
-      method: request.method,
-      headers,
-      body: request.body ? JSON.stringify(request.body) : undefined
-    });
-
-    const textBody = await response.text();
-    const parsedBody = this.parseBody(textBody);
-
-    if (!response.ok) {
-      const message = this.extractErrorMessage(parsedBody, response.status);
-      return {
-        ok: false,
-        error: {
-          code: "INTERNAL_ERROR",
-          message,
-          target: input.target_project_id,
-          operation_id: input.operation.operation_id,
-          retryable: response.status >= 500
-        }
-      };
+    if (!request.omitProjectHeader) {
+      headers["X-Appwrite-Project"] = input.target_project_id;
     }
 
-    if (parsedBody && typeof parsedBody === "object") {
-      return {
-        ok: true,
-        data: parsedBody as Record<string, unknown>
-      };
+    if (!request.formData) {
+      headers["Content-Type"] = "application/json";
+    }
+
+    const canRetry = this.canRetryRequest(request, input.operation);
+    const maxAttempts = canRetry ? this.maxRetries + 1 : 1;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        const response = await this.fetchWithTimeout(url, {
+          method: request.method,
+          headers,
+          body: request.formData
+            ? request.formData
+            : request.body
+              ? JSON.stringify(request.body)
+              : undefined
+        });
+
+        const textBody = await response.text();
+        const parsedBody = this.parseBody(textBody);
+        const retryableStatus = this.retryStatusCodes.has(response.status);
+
+        if (!response.ok) {
+          if (retryableStatus && attempt < maxAttempts) {
+            await this.sleep(this.retryDelayMs(attempt));
+            continue;
+          }
+
+          const message = this.extractErrorMessage(parsedBody, response.status);
+          return {
+            ok: false,
+            error: {
+              code: "INTERNAL_ERROR",
+              message,
+              target: input.target_project_id,
+              operation_id: input.operation.operation_id,
+              retryable: retryableStatus
+            }
+          };
+        }
+
+        if (parsedBody && typeof parsedBody === "object") {
+          return {
+            ok: true,
+            data: parsedBody as Record<string, unknown>
+          };
+        }
+
+        return {
+          ok: true,
+          data: { value: parsedBody }
+        };
+      } catch (error) {
+        const retryableError = this.isRetryableError(error);
+        if (retryableError && attempt < maxAttempts) {
+          await this.sleep(this.retryDelayMs(attempt));
+          continue;
+        }
+
+        return {
+          ok: false,
+          error: {
+            code: "INTERNAL_ERROR",
+            message: this.extractRuntimeMessage(error),
+            target: input.target_project_id,
+            operation_id: input.operation.operation_id,
+            retryable: retryableError
+          }
+        };
+      }
     }
 
     return {
-      ok: true,
-      data: { value: parsedBody }
+      ok: false,
+      error: {
+        code: "INTERNAL_ERROR",
+        message: "request retries exhausted",
+        target: input.target_project_id,
+        operation_id: input.operation.operation_id,
+        retryable: true
+      }
     };
   }
 
@@ -154,23 +233,103 @@ export class HttpAppwriteAdapter implements AppwriteAdapter {
     return `Appwrite request failed with status ${statusCode}`;
   }
 
+  private async fetchWithTimeout(
+    url: URL,
+    init: {
+      method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+      headers: Record<string, string>;
+      body?: FormData | string;
+    }
+  ): Promise<Response> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => {
+      controller.abort();
+    }, this.timeoutMs);
+
+    try {
+      return await fetch(url, {
+        ...init,
+        signal: controller.signal
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private canRetryRequest(
+    request: HttpOperationRequest,
+    operation: MutationOperation
+  ): boolean {
+    return request.method === "GET" || typeof operation.idempotency_key === "string";
+  }
+
+  private retryDelayMs(attempt: number): number {
+    const base = Math.min(
+      this.retryBaseDelayMs * 2 ** Math.max(0, attempt - 1),
+      this.retryMaxDelayMs
+    );
+    const jitter = Math.floor(Math.random() * Math.max(1, Math.floor(base * 0.25)));
+    return base + jitter;
+  }
+
+  private async sleep(ms: number): Promise<void> {
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, ms);
+    });
+  }
+
+  private isRetryableError(error: unknown): boolean {
+    if (error instanceof AppwriteMcpError) {
+      return false;
+    }
+
+    if (error instanceof Error && error.name === "AbortError") {
+      return true;
+    }
+
+    return true;
+  }
+
+  private extractRuntimeMessage(error: unknown): string {
+    if (error instanceof Error && error.name === "AbortError") {
+      return `Appwrite request timed out after ${this.timeoutMs}ms`;
+    }
+
+    if (error instanceof Error && error.message.length > 0) {
+      return `Appwrite request failed: ${error.message}`;
+    }
+
+    return "Appwrite request failed due to unexpected runtime error";
+  }
+
   private buildRequest(operation: MutationOperation): HttpOperationRequest {
     switch (operation.action) {
       case "project.create":
         return {
           method: "POST",
           path: "projects",
-          body: operation.params
+          body: this.toProjectCreateBody(operation.params),
+          omitProjectHeader: true
         };
 
       case "project.delete": {
         const projectId = this.readString(operation.params, [
+          "projectId",
           "project_id",
           "delete_project_id"
         ]);
         return {
           method: "DELETE",
-          path: `projects/${encodeURIComponent(projectId)}`
+          path: `projects/${encodeURIComponent(projectId)}`,
+          omitProjectHeader: true
+        };
+      }
+
+      case "database.list": {
+        return {
+          method: "GET",
+          path: "databases",
+          query: this.asQuery(operation.params)
         };
       }
 
@@ -227,15 +386,46 @@ export class HttpAppwriteAdapter implements AppwriteAdapter {
           body: operation.params
         };
 
-      case "auth.users.update": {
-        const userId = this.readString(operation.params, ["user_id"]);
+      case "auth.users.update.email":
+        return this.buildAuthUsersUpdateRequest(operation, "email");
 
-        return {
-          method: "PATCH",
-          path: `users/${encodeURIComponent(userId)}`,
-          body: operation.params
-        };
+      case "auth.users.update.name":
+        return this.buildAuthUsersUpdateRequest(operation, "name");
+
+      case "auth.users.update.status":
+        return this.buildAuthUsersUpdateRequest(operation, "status");
+
+      case "auth.users.update.password":
+        return this.buildAuthUsersUpdateRequest(operation, "password");
+
+      case "auth.users.update.phone":
+        return this.buildAuthUsersUpdateRequest(operation, "phone");
+
+      case "auth.users.update.email_verification":
+        return this.buildAuthUsersUpdateRequest(operation, "emailVerification");
+
+      case "auth.users.update.phone_verification":
+        return this.buildAuthUsersUpdateRequest(operation, "phoneVerification");
+
+      case "auth.users.update.mfa":
+        return this.buildAuthUsersUpdateRequest(operation, "mfa");
+
+      case "auth.users.update.labels":
+        return this.buildAuthUsersUpdateRequest(operation, "labels");
+
+      case "auth.users.update.prefs":
+        return this.buildAuthUsersUpdateRequest(operation, "prefs");
+
+      case "auth.users.update": {
+        return this.buildAuthUsersUpdateRequest(operation, "auto");
       }
+
+      case "function.list":
+        return {
+          method: "GET",
+          path: "functions",
+          query: this.asQuery(operation.params)
+        };
 
       case "function.create":
         return {
@@ -260,7 +450,7 @@ export class HttpAppwriteAdapter implements AppwriteAdapter {
         return {
           method: "POST",
           path: `functions/${encodeURIComponent(functionId)}/deployments`,
-          body: operation.params
+          formData: this.toFunctionDeploymentFormData(operation)
         };
       }
 
@@ -347,5 +537,174 @@ export class HttpAppwriteAdapter implements AppwriteAdapter {
       target: "operation",
       operation_id: "*"
     });
+  }
+
+  private buildAuthUsersUpdateRequest(
+    operation: MutationOperation,
+    expectedField:
+      | "auto"
+      | "email"
+      | "name"
+      | "status"
+      | "password"
+      | "phone"
+      | "emailVerification"
+      | "phoneVerification"
+      | "mfa"
+      | "labels"
+      | "prefs"
+  ): HttpOperationRequest {
+    const userId = this.readString(operation.params, ["user_id"]);
+
+    const allow = (field: string): boolean =>
+      expectedField === "auto" || expectedField === field;
+
+    if (allow("email") && typeof operation.params.email === "string") {
+      return {
+        method: "PATCH",
+        path: `users/${encodeURIComponent(userId)}/email`,
+        body: { email: operation.params.email }
+      };
+    }
+
+    if (allow("name") && typeof operation.params.name === "string") {
+      return {
+        method: "PATCH",
+        path: `users/${encodeURIComponent(userId)}/name`,
+        body: { name: operation.params.name }
+      };
+    }
+
+    if (allow("status") && typeof operation.params.status === "boolean") {
+      return {
+        method: "PATCH",
+        path: `users/${encodeURIComponent(userId)}/status`,
+        body: { status: operation.params.status }
+      };
+    }
+
+    if (allow("password") && typeof operation.params.password === "string") {
+      return {
+        method: "PATCH",
+        path: `users/${encodeURIComponent(userId)}/password`,
+        body: { password: operation.params.password }
+      };
+    }
+
+    if (allow("phone") && typeof operation.params.phone === "string") {
+      return {
+        method: "PATCH",
+        path: `users/${encodeURIComponent(userId)}/phone`,
+        body: { number: operation.params.phone }
+      };
+    }
+
+    if (
+      allow("emailVerification") &&
+      typeof operation.params.emailVerification === "boolean"
+    ) {
+      return {
+        method: "PATCH",
+        path: `users/${encodeURIComponent(userId)}/verification`,
+        body: { emailVerification: operation.params.emailVerification }
+      };
+    }
+
+    if (
+      allow("phoneVerification") &&
+      typeof operation.params.phoneVerification === "boolean"
+    ) {
+      return {
+        method: "PATCH",
+        path: `users/${encodeURIComponent(userId)}/verification/phone`,
+        body: { phoneVerification: operation.params.phoneVerification }
+      };
+    }
+
+    if (allow("mfa") && typeof operation.params.mfa === "boolean") {
+      return {
+        method: "PATCH",
+        path: `users/${encodeURIComponent(userId)}/mfa`,
+        body: { mfa: operation.params.mfa }
+      };
+    }
+
+    if (allow("labels") && Array.isArray(operation.params.labels)) {
+      return {
+        method: "PUT",
+        path: `users/${encodeURIComponent(userId)}/labels`,
+        body: { labels: operation.params.labels }
+      };
+    }
+
+    if (
+      allow("prefs") &&
+      operation.params.prefs &&
+      typeof operation.params.prefs === "object" &&
+      !Array.isArray(operation.params.prefs)
+    ) {
+      return {
+        method: "PATCH",
+        path: `users/${encodeURIComponent(userId)}/prefs`,
+        body: { prefs: operation.params.prefs }
+      };
+    }
+
+    throw new AppwriteMcpError(
+      "VALIDATION_ERROR",
+      "auth.users.update requires one supported field (email, name, status, password, phone, emailVerification, phoneVerification, mfa, labels, prefs)",
+      {
+        operation_id: operation.operation_id,
+        target: "params"
+      }
+    );
+  }
+
+  private toProjectCreateBody(
+    params: Record<string, unknown>
+  ): Record<string, unknown> {
+    const projectId = this.readString(params, ["projectId", "project_id"]);
+    const teamId = this.readString(params, ["teamId", "team_id"]);
+    const name = this.readString(params, ["name"]);
+
+    return {
+      ...params,
+      projectId,
+      teamId,
+      name
+    };
+  }
+
+  private toFunctionDeploymentFormData(operation: MutationOperation): FormData {
+    const code = operation.params.code;
+    if (typeof code !== "string") {
+      throw new AppwriteMcpError(
+        "VALIDATION_ERROR",
+        "function.deployment.trigger requires code string",
+        {
+          operation_id: operation.operation_id,
+          target: "params"
+        }
+      );
+    }
+
+    const formData = new FormData();
+    formData.append("code", code);
+
+    const activate =
+      typeof operation.params.activate === "boolean"
+        ? operation.params.activate
+        : false;
+    formData.append("activate", String(activate));
+
+    if (typeof operation.params.entrypoint === "string") {
+      formData.append("entrypoint", operation.params.entrypoint);
+    }
+
+    if (typeof operation.params.commands === "string") {
+      formData.append("commands", operation.params.commands);
+    }
+
+    return formData;
   }
 }
