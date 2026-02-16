@@ -1,6 +1,64 @@
 # appwrite-mcp
 
+[![CI](https://github.com/sigee-min/appwrite-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/sigee-min/appwrite-mcp/actions/workflows/ci.yml)
+[![Release](https://github.com/sigee-min/appwrite-mcp/actions/workflows/release.yml/badge.svg)](https://github.com/sigee-min/appwrite-mcp/actions/workflows/release.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+
 MCP server for controlled Appwrite mutations with preview/apply workflow, plan hashing, per-target auth contexts, and safety checks for destructive operations.
+
+## Quick Start
+
+Use this path if you want to get running quickly with production-friendly defaults.
+
+1) Install dependencies
+
+```bash
+npm install
+```
+
+2) Create an auth file (minimal required shape)
+
+```json
+{
+  "default_endpoint": "https://your-appwrite-domain/v1",
+  "projects": {
+    "YOUR_PROJECT_ID": {
+      "api_key": "sk_your_api_key"
+    }
+  }
+}
+```
+
+3) Start the MCP server (stdio is the default transport)
+
+```bash
+APPWRITE_PROJECT_AUTH_FILE=/path/to/project-auth.json npm run dev
+```
+
+4) Optional: run over streamable HTTP
+
+```bash
+APPWRITE_PROJECT_AUTH_FILE=/path/to/project-auth.json \
+APPWRITE_MCP_ENABLE_STREAMABLE_HTTP=true \
+APPWRITE_MCP_TRANSPORT=streamable-http \
+npm run dev
+```
+
+5) Verify your setup
+
+```bash
+npm test
+npm run build
+```
+
+Optional live read-only verification (requires real credentials):
+
+```bash
+APPWRITE_PROJECT_AUTH_FILE=/path/to/project-auth.json \
+APPWRITE_LIVE_TARGET_PROJECT_ID=your_project_id \
+APPWRITE_MCP_CONFIRM_SECRET=your_confirm_secret \
+npm run test:e2e:live:extended
+```
 
 ## What is implemented
 
@@ -20,6 +78,35 @@ MCP server for controlled Appwrite mutations with preview/apply workflow, plan h
   - confirmation token for critical destructive operations
   - per-project auth context + scope checks
   - secret redaction in logs/results
+
+## Supported action scope (current)
+
+- Read-only actions:
+  - `auth.users.list`
+  - `database.list`
+  - `function.list`
+  - `function.execution.status`
+- Mutation actions:
+  - `project.create`, `project.delete` (management channel)
+  - `database.create`, `database.upsert_collection`, `database.delete_collection`
+  - `auth.users.create`, `auth.users.update.email|name|status|password|phone|email_verification|phone_verification|mfa|labels|prefs`
+  - `function.create`, `function.update`, `function.deployment.trigger`, `function.execution.trigger`
+- Compatibility alias:
+  - `auth.users.update` (deprecated, still supported unless explicitly blocked)
+
+## Current safety defaults
+
+- `changes.apply` requires a matching `plan_id` + `plan_hash` from preview.
+- Critical destructive operations require `confirm.issue` token.
+- `project.*` operations require project-management capability and management auth context.
+- HTTP retries are conservative by default (GET/idempotent requests only).
+- Scope metadata in auth file is optional; when omitted, runtime does not block on local scope preflight.
+
+## Current limitations (explicit)
+
+- Optional online/live tests are opt-in and require external credentials.
+- This project validates request contracts and orchestration; it does not provide automatic rollback of upstream Appwrite mutations.
+- `streamable-http` remote bind requires explicit opt-in (`APPWRITE_MCP_ALLOW_REMOTE_HTTP=true`).
 
 ## Requirements
 
