@@ -15,12 +15,10 @@
   "default_endpoint": "https://cloud.appwrite.io/v1",
   "projects": {
     "PROJECT_A": {
-      "api_key": "sk_a",
-      "scopes": ["users.read", "users.write"]
+      "api_key": "sk_a"
     },
     "PROJECT_B": {
-      "api_key": "sk_b",
-      "scopes": ["users.read"]
+      "api_key": "sk_b"
     }
   }
 }
@@ -47,4 +45,4 @@ The report includes:
 - `CASE-02`: expected `PARTIAL_SUCCESS`
 - `CASE-03`: expected `FAILED`
 
-If `CASE-02` does not produce `PARTIAL_SUCCESS`, tune project scopes so one target lacks the partial-case required scope while the other has it.
+If `CASE-02` does not produce `PARTIAL_SUCCESS`, use API keys with different permission sets so one target can execute the operation and the other cannot.
