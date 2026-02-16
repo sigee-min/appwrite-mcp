@@ -9,6 +9,9 @@
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
     "test": "vitest run",
+    "test:openapi:online": "APPWRITE_MCP_ONLINE_OPENAPI_CONTRACT=true vitest run test/openapi-contract-guard.test.ts",
+    "test:e2e:live": "APPWRITE_MCP_ENABLE_LIVE_E2E=true vitest run test/live-appwrite-e2e.test.ts",
+    "test:e2e:live:extended": "APPWRITE_MCP_ENABLE_LIVE_E2E=true APPWRITE_MCP_ENABLE_LIVE_EXTENDED_READ_E2E=true vitest run test/live-appwrite-e2e.test.ts",
     "smoke:e2e:manual": "tsx src/e2e/manual-smoke.ts --manual"
   },
   "dependencies": {
