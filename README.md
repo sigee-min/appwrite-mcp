@@ -208,3 +208,7 @@ npm run smoke:e2e:manual
 - API mapping: `docs/api-endpoint-mapping.md`
 - Ops runbook: `docs/ops-runbook.md`
 - Release runbook: `docs/releases.md`
+
+## License
+
+MIT. See `LICENSE`.
